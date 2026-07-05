@@ -1,14 +1,20 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+#[derive(Debug)]
+pub enum PermissionCategory {
+    Filesystem,
+    Hardware,
+    Network,
+    Desktop,
+    System,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+#[derive(Debug)]
+pub struct Permission {
+    pub category: PermissionCategory,
+    pub description: String,
+    pub source_mechanism: String,
+    pub raw: String,
+}
+#[derive(Debug)]
+pub struct AppProfile {
+    pub app_id: String,
+    pub permissions: Vec<Permission>,
 }
