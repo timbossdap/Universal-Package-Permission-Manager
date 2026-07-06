@@ -1,12 +1,6 @@
-//! Core types shared by all the collectors. Started out flatpak-only, the
-//! idea is snap/native distro packages get their own collector later and
-//! just plug into the same AppProfile/Permission shapes.
-
 pub mod collectors;
 
-/// Broad buckets we sort permissions into. Roughly mirrors how flatpak
-/// groups things in `flatpak info --show-permissions`, kept generic enough
-/// that other collectors can reuse it.
+//broad bucket based on flatpak syntax
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PermissionCategory {
     Filesystem,
@@ -29,22 +23,15 @@ impl std::fmt::Display for PermissionCategory {
     }
 }
 
-/// One permission grant found for an app, plus enough context to explain
-/// why it got flagged and where it came from.
 #[derive(Debug, Clone)]
 pub struct Permission {
     pub category: PermissionCategory,
     pub description: String,
     pub source_mechanism: String,
-    /// Raw override string as the source tool reported it, unparsed.
-    /// Kept around for debugging when the description doesn't add up.
     pub raw: String,
 }
 
 impl Permission {
-    /// Rough "worth a second look" check, not a real audit - just enough
-    /// to separate the noisy stuff (GPU, wayland) from things like full
-    /// filesystem or all-devices access.
     pub fn is_high_risk(&self) -> bool {
         let d = self.description.to_lowercase();
         d.contains("entire filesystem")
@@ -74,8 +61,6 @@ impl AppProfile {
     }
 }
 
-/// Totals across a whole scan, mostly so the CLI has something to print at
-/// the end instead of just a wall of per-app output.
 pub struct ScanSummary {
     pub app_count: u32,
     pub flagged_count: u32,
@@ -83,7 +68,10 @@ pub struct ScanSummary {
 
 impl ScanSummary {
     pub fn new(app_count: u32, flagged_count: u32) -> ScanSummary {
-        ScanSummary { app_count, flagged_count }
+        ScanSummary {
+            app_count,
+            flagged_count,
+        }
     }
 
     /// Build a summary straight from scan results instead of counting by
