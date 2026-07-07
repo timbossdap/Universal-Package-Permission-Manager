@@ -1,1 +1,0 @@
-/home/babygirl/projects/Universal-Package-Permission-Manager/target/debug/libcore.rlib: /home/babygirl/projects/Universal-Package-Permission-Manager/core/src/collectors/flatpak.rs /home/babygirl/projects/Universal-Package-Permission-Manager/core/src/collectors/mod.rs /home/babygirl/projects/Universal-Package-Permission-Manager/core/src/lib.rs
