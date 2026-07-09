@@ -58,5 +58,19 @@ pub fn collect(&self) -> Result<Vec<AppProfile>, String> {
     for id in app_ids{
         let raw_data = fetch_raw_data
     }
+    for id in app_ids {
+        match fetch_app_data(&id) {
+            Ok(raw_data) => {
+                let permissions = trans_raw_output(&raw_data);
+                let mut profile = AppProfile::new(id);
+                profile.permissions = permissions;
+                profiles.push(profile);
+            }
+            Err(e) => {
+                println!("Error: Could not get details for {}, reason: {}", id, e);
+            }
+        }
+    }
+    Ok(profiles)
 
 }
