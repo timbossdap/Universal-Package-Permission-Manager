@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::process::Command;
 
 use crate::AppProfile;
-use crate::Permission;
-use crate::PermissionCategory;
+use crate::Perms;
+use crate::PermCat;
 // lists all the installed flatpak apps
 fn list_app_ids() -> Result<Vec<String>, CollectorError> {
     let output = Command::new("flatpak")
@@ -28,8 +28,8 @@ fn trans_raw_output(input: &str) -> Vec<Permission> {
             continue;
         }
         if line.contains("network") {
-            results.push(Permission {
-                category: PermissionCategory::Network,
+            results.push(Perms {
+                category: PermCat::Network,
                 description: "Network access".to_string(),
                 source_mechanism: "flatpak".to_string(),
                 raw: line.to_string(),
