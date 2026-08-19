@@ -20,6 +20,7 @@ fn list_app_ids() -> Result<Vec<String>, CollectorError> {
     let ids = text
         .lines()
         .filter(|l| !l.trim().is_empty())
+        .filter(|l| !l.starts_with("Name:") && !l.starts_with("Application ID"))
         .map(|l| l.trim().to_string())
         .collect();
     Ok(ids)
