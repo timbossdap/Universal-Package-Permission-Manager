@@ -1,32 +1,35 @@
-use core::PermCat;
 use core::collectors::flatpak;
+use core::collectors::pacman;
 
 fn print_profile(profile: &core::AppProf) {
     println!("Profile: {}", profile.app_id);
-    let net_list: Vec<String> = profile
-        .permissions
-        .iter()
-        .filter(|p| p.cat == PermCat::Network)
-        .map(|p| p.desc.clone())
-        .collect();
-    if !net_list.is_empty() {
-        println!("Network access: {}", net_list.join(", "));
+    if profile.permissions.is_empty() {
+        return;
+    }
+    for perm in &profile.permissions {
+        println!("  [{}] {}", perm.cat, perm.desc);
     }
 }
 
 fn main() {
+    let mut profiles = Vec::new();
+
     match flatpak::collect() {
-        Ok(profiles) => {
-            if !profiles.is_empty() {
-                for profile in &profiles {
-                    print_profile(profile);
-                }
-            } else {
-                println!("No apps found.");
-            }
-        }
-        Err(e) => {
-            eprintln!("Error: {}", e);
-        }
+        Ok(p) => profiles.extend(p),
+        Err(e) => eprintln!("Error (flatpak): {}", e),
+    }
+
+    match pacman::collect() {
+        Ok(p) => profiles.extend(p),
+        Err(e) => eprintln!("Error (pacman): {}", e),
+    }
+
+    if profiles.is_empty() {
+        println!("No apps found.");
+        return;
+    }
+
+    for profile in &profiles {
+        print_profile(profile);
     }
 }

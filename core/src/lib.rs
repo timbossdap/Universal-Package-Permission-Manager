@@ -10,7 +10,7 @@ pub enum PermCat {
 }
 
 impl std::fmt::Display for PermCat {
-    fn fmt(&self, f: &mut std::fmt::_Formatter) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let label = match self {
             PermCat::Filesystem => "Filesystem",
             PermCat::Network => "Network",
@@ -31,7 +31,7 @@ pub struct Perm {
 }
 
 impl std::fmt::Display for Perm {
-    fn fmt(&self, f: &mut std::fmt::_Formatter) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}: {}", self.cat, self.desc)
     }
 }
@@ -95,7 +95,7 @@ pub enum CollectorError {
 }
 
 impl std::fmt::Display for CollectorError {
-    fn fmt(&self, f: &mut std::fmt::_Formatter) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             CollectorError::NotInst(msg) => write!(f, "not installed: {}", msg),
             CollectorError::CmdErr(msg) => write!(f, "command failed: {}", msg),
