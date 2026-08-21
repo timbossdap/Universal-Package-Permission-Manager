@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::process::Command;
 
 use crate::AppProf;
@@ -18,7 +19,6 @@ fn list_app_ids() -> Result<Vec<String>, CollectorError> {
         .lines()
         .filter(|l| !l.is_empty())
         .map(|l| {
-            // pacman -Q output format: "package-name version"
             l.split_whitespace().next().unwrap_or("").trim().to_string()
         })
         .collect();
@@ -83,54 +83,91 @@ fn describe_path(path: &str) -> Option<(PermCat, String)> {
     }
 }
 
-fn check_setuid_setgid(path: &str) -> Option<(PermCat, String)> {
-    use std::os::unix::fs::PermissionsExt;
-    let meta = std::fs::symlink_metadata(path).ok()?;
-    if meta.file_type().is_symlink() {
+fn check_capabilities(path: &str) -> Option<(PermCat, String)> {
+    let output = Command::new("getcap").arg(path).output().ok()?;
+    if !output.status.success() {
         return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let caps = text.split_once(' ').map(|(_, c)| c.trim()).unwrap_or(text);
+    if caps.is_empty() {
+        return None;
+    }
+    Some((
+        PermCat::System,
+        format!("Has Linux capabilities: {caps} (elevated privilege without setuid)"),
+    ))
+}
+
+fn check_binary_privileges(path: &str) -> Vec<(PermCat, String)> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut results = Vec::new();
+
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return results;
+    };
+    if meta.file_type().is_symlink() {
+        return results;
     }
     let mode = meta.permissions().mode();
     let setuid = mode & 0o4000 != 0;
     let setgid = mode & 0o2000 != 0;
     match (setuid, setgid) {
-        (true, true) => Some((
+        (true, true) => results.push((
             PermCat::System,
             "setuid+setgid binary (runs as file owner/group)".to_string(),
         )),
-        (true, false) => Some((
+        (true, false) => results.push((
             PermCat::System,
             "setuid binary (runs as file owner, often root)".to_string(),
         )),
-        (false, true) => Some((
+        (false, true) => results.push((
             PermCat::System,
             "setgid binary (runs as file group)".to_string(),
         )),
-        (false, false) => None,
+        (false, false) => {}
     }
+
+
+    let executable = mode & 0o111 != 0;
+    if executable {
+        if let Some(cap) = check_capabilities(path) {
+            results.push(cap);
+        }
+    }
+
+    results
 }
 
-fn list_owned_files(app_id: &str) -> Result<Vec<String>, CollectorError> {
+fn list_all_owned_files() -> Result<HashMap<String, Vec<String>>, CollectorError> {
     let output = Command::new("pacman")
         .arg("-Ql")
-        .arg(app_id)
         .output()
-        .map_err(|_| CollectorError::NotInst(format!("{app_id} is not installed")))?;
+        .map_err(|_| CollectorError::CmdErr("failed to run pacman -Ql".to_string()))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(CollectorError::CmdErr(format!(
-            "pacman -Ql failed for {app_id}: {stderr}"
-        )));
+        return Err(CollectorError::CmdErr(format!("pacman -Ql failed: {stderr}")));
     }
 
     let text = String::from_utf8_lossy(&output.stdout).to_string();
-    let files = text
-        .lines()
-        .filter_map(|line| line.split_once(' '))
-        .map(|(_, path)| path.trim().to_string())
-        .filter(|path| !path.ends_with('/'))
-        .collect();
-    Ok(files)
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    for line in text.lines() {
+        // Format: "pkgname /some/path"
+        let Some((pkg, path)) = line.split_once(' ') else {
+            continue;
+        };
+        let path = path.trim();
+        if path.is_empty() || path.ends_with('/') {
+            continue;
+        }
+        map.entry(pkg.to_string()).or_default().push(path.to_string());
+    }
+    Ok(map)
 }
 
 fn parse_permissions(files: &[String]) -> Vec<Perm> {
@@ -144,7 +181,7 @@ fn parse_permissions(files: &[String]) -> Vec<Perm> {
                 raw: path.clone(),
             });
         }
-        if let Some((cat, desc)) = check_setuid_setgid(path) {
+        for (cat, desc) in check_binary_privileges(path) {
             results.push(Perm {
                 cat,
                 desc,
@@ -156,19 +193,92 @@ fn parse_permissions(files: &[String]) -> Vec<Perm> {
     results
 }
 
+
+const PRIVILEGED_DEPS: &[(&str, &str)] = &[
+    (
+        "polkit",
+        "Depends on polkit (can request privilege escalation via authentication prompts)",
+    ),
+    (
+        "systemd",
+        "Depends on systemd (can register services, timers, or other units)",
+    ),
+    (
+        "sudo",
+        "Depends on sudo (can request elevated command execution)",
+    ),
+    ("dbus", "Depends on dbus (privileged IPC access)"),
+    ("pam", "Depends on PAM (can affect authentication)"),
+];
+
+fn get_all_depends() -> HashMap<String, Vec<String>> {
+    let output = match Command::new("pacman").arg("-Qi").output() {
+        Ok(o) if o.status.success() => o,
+        _ => return HashMap::new(),
+    };
+    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    let mut current_name: Option<String> = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("Name") {
+            let rest = rest.trim_start_matches(|c: char| c == ' ' || c == ':').trim();
+            if !rest.is_empty() {
+                current_name = Some(rest.to_string());
+            }
+        } else if let Some(rest) = line.strip_prefix("Depends On") {
+            let rest = rest.trim_start_matches(|c: char| c == ' ' || c == ':').trim();
+            let Some(name) = current_name.clone() else {
+                continue;
+            };
+            let deps: Vec<String> = if rest.is_empty() || rest == "None" {
+                Vec::new()
+            } else {
+                rest.split_whitespace()
+                    .map(|d| {
+                        d.split(['>', '<', '=']).next().unwrap_or(d).to_string()
+                    })
+                    .collect()
+            };
+            map.insert(name, deps);
+        }
+    }
+    map
+}
+
+fn check_dependencies(app_id: &str, depends_map: &HashMap<String, Vec<String>>) -> Vec<Perm> {
+    let empty: Vec<String> = Vec::new();
+    let deps = depends_map.get(app_id).unwrap_or(&empty);
+    let mut results = Vec::new();
+    for (needle, desc) in PRIVILEGED_DEPS {
+        if deps.iter().any(|d| d == needle) {
+            results.push(Perm {
+                cat: PermCat::System,
+                desc: desc.to_string(),
+                source_mech: "pacman-deps".to_string(),
+                raw: format!("Depends On: {needle}"),
+            });
+        }
+    }
+    results
+}
+
 pub fn collect() -> Result<Vec<AppProf>, String> {
     let app_ids = list_app_ids().map_err(|e| e.to_string())?;
+    let owned_files = list_all_owned_files().map_err(|e| e.to_string())?;
+    let depends_map = get_all_depends();
+
     let mut profiles = Vec::new();
     for id in app_ids {
-        match list_owned_files(&id) {
-            Ok(files) => {
-                let permissions = parse_permissions(&files);
+        match owned_files.get(&id) {
+            Some(files) => {
+                let mut permissions = parse_permissions(files);
+                permissions.extend(check_dependencies(&id, &depends_map));
                 let mut profile = AppProf::new(id);
                 profile.permissions = permissions;
                 profiles.push(profile);
             }
-            Err(e) => {
-                println!("Error: Could not get details for {id}, reason: {e}");
+            None => {
+                println!("Error: Could not get details for {id}, reason: no files found in pacman -Ql");
             }
         }
     }
