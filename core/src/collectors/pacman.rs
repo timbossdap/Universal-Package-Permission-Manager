@@ -18,9 +18,7 @@ fn list_app_ids() -> Result<Vec<String>, CollectorError> {
     let ids = text
         .lines()
         .filter(|l| !l.is_empty())
-        .map(|l| {
-            l.split_whitespace().next().unwrap_or("").trim().to_string()
-        })
+        .map(|l| l.split_whitespace().next().unwrap_or("").trim().to_string())
         .collect();
     Ok(ids)
 }
@@ -132,7 +130,6 @@ fn check_binary_privileges(path: &str) -> Vec<(PermCat, String)> {
         (false, false) => {}
     }
 
-
     let executable = mode & 0o111 != 0;
     if executable {
         if let Some(cap) = check_capabilities(path) {
@@ -151,7 +148,9 @@ fn list_all_owned_files() -> Result<HashMap<String, Vec<String>>, CollectorError
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(CollectorError::CmdErr(format!("pacman -Ql failed: {stderr}")));
+        return Err(CollectorError::CmdErr(format!(
+            "pacman -Ql failed: {stderr}"
+        )));
     }
 
     let text = String::from_utf8_lossy(&output.stdout).to_string();
@@ -165,7 +164,9 @@ fn list_all_owned_files() -> Result<HashMap<String, Vec<String>>, CollectorError
         if path.is_empty() || path.ends_with('/') {
             continue;
         }
-        map.entry(pkg.to_string()).or_default().push(path.to_string());
+        map.entry(pkg.to_string())
+            .or_default()
+            .push(path.to_string());
     }
     Ok(map)
 }
@@ -192,7 +193,6 @@ fn parse_permissions(files: &[String]) -> Vec<Perm> {
     }
     results
 }
-
 
 const PRIVILEGED_DEPS: &[(&str, &str)] = &[
     (
@@ -221,12 +221,16 @@ fn get_all_depends() -> HashMap<String, Vec<String>> {
     let mut current_name: Option<String> = None;
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("Name") {
-            let rest = rest.trim_start_matches(|c: char| c == ' ' || c == ':').trim();
+            let rest = rest
+                .trim_start_matches(|c: char| c == ' ' || c == ':')
+                .trim();
             if !rest.is_empty() {
                 current_name = Some(rest.to_string());
             }
         } else if let Some(rest) = line.strip_prefix("Depends On") {
-            let rest = rest.trim_start_matches(|c: char| c == ' ' || c == ':').trim();
+            let rest = rest
+                .trim_start_matches(|c: char| c == ' ' || c == ':')
+                .trim();
             let Some(name) = current_name.clone() else {
                 continue;
             };
@@ -234,9 +238,7 @@ fn get_all_depends() -> HashMap<String, Vec<String>> {
                 Vec::new()
             } else {
                 rest.split_whitespace()
-                    .map(|d| {
-                        d.split(['>', '<', '=']).next().unwrap_or(d).to_string()
-                    })
+                    .map(|d| d.split(['>', '<', '=']).next().unwrap_or(d).to_string())
                     .collect()
             };
             map.insert(name, deps);
@@ -278,7 +280,9 @@ pub fn collect() -> Result<Vec<AppProf>, String> {
                 profiles.push(profile);
             }
             None => {
-                println!("Error: Could not get details for {id}, reason: no files found in pacman -Ql");
+                println!(
+                    "Error: Could not get details for {id}, reason: no files found in pacman -Ql"
+                );
             }
         }
     }

@@ -1,74 +1,126 @@
 import QtQuick 2.15
 import QtQuick.Window 2.15
 import QtQuick.Controls 2.15
+import QtQuick.Controls.Material 2.15
 import QtQuick.Layouts 1.15
 
-Window {
+ApplicationWindow {
+    id: mainWindow
     visible: true
     width: 800
     height: 600
     title: "UPPM"
-    color: "black"
 
-    property int selectedIndex: -1
-    
-    ColumnLayout {
-        anchors.fill: parent
-        spacing: 0
+    Material.theme: Material.Dark
+    Material.accent: Material.Teal
 
-        TabBar {
-            id: sourceTabs
-            Layout.fillWidth: true
-            TabButton { text: "Flatpak" }
-            TabButton { text: "Pacman" }
-            onCurrentIndexChanged: {
-                selectedIndex = -1
-                uppm.select_source(currentIndex)
-            }
+    AppSettings {
+        id: settings
+    }
+
+    // tracking the selected app by its id string (not a numeric index) means
+    // we don't have to worry about indices shifting around when the search
+    // filter changes what's actually visible in the list
+    property string selectedAppId: ""
+    property int currentTabIndex: 0
+    property string currentPage: "main"
+
+    // filter app list based on search text
+    property var filteredAppIds: {
+        var ids = uppm.app_ids
+        var needle = mainPage.searchText.toLowerCase()
+        var out = []
+
+        if (needle.length == 0) {
+            return ids
         }
 
-        RowLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            spacing: 1
-
-            ListView {
-                id: appList
-                Layout.preferredWidth: parent.width / 2
-                Layout.fillHeight: true
-                model: uppm.app_ids
-                clip: true
-
-                delegate: ItemDelegate {
-                    width: appList.width
-                    highlighted: index === selectedIndex
-                    text: (index + 1) + ". " + modelData
-                    onClicked: {
-                        selectedIndex = index
-                        uppm.select_app(index)
-                    }
-                }
+        var i = 0
+        while (i < ids.length) {
+            var id = ids[i]
+            var lower = id.toLowerCase()
+            var found = lower.indexOf(needle)
+            if (found != -1) {
+                out.push(id)
             }
+            i = i + 1
+        }
+        return out
+    }
 
-            ListView {
-                id: permList
-                Layout.preferredWidth: parent.width / 2
-                Layout.fillHeight: true
-                model: uppm.permissions
-                clip: true
-
-                delegate: ItemDelegate {
-                    width: permList.width
-                    text: modelData
-                }
-
-                Label {
-                    anchors.centerIn: parent
-                    visible: permList.count === 0
-                    text: "select an app on the left to see its permissions"
-                    color: "gray"
-                }
+    header: TitleBar {
+        currentTabIndex: mainWindow.currentTabIndex
+        onOpenMenuRequested: {
+            sideMenu.open()
+        }
+        onTabSelected: function(index) {
+            var cur = mainWindow.currentTabIndex
+            if (cur == index) {
+                return
             }
+            mainWindow.currentTabIndex = index
+            mainWindow.selectedAppId = ""
+            mainPage.searchText = ""
+            uppm.select_source(index)
+        }
+    }
+
+    SideMenu {
+        id: sideMenu
+        currentPage: mainWindow.currentPage
+        onPageSelected: function(page) {
+            mainWindow.currentPage = page
+        }
+    }
+
+    MainPage {
+        id: mainPage
+        visible: {
+            if (mainWindow.currentPage == "main") {
+                return true
+            } else {
+                return false
+            }
+        }
+        selectedAppId: mainWindow.selectedAppId
+        filteredAppIds: mainWindow.filteredAppIds
+        settings: settings
+        onAppSelected: function(appId) {
+            mainWindow.selectedAppId = appId
+            // still need the app's index in the *unfiltered* list,
+            // since that's what the rust side's profiles vec uses
+            var allIds = uppm.app_ids
+            var idx = allIds.indexOf(appId)
+            uppm.select_app(idx)
+        }
+    }
+
+    SettingsPage {
+        id: settingsPage
+        visible: {
+            if (mainWindow.currentPage == "settings") {
+                return true
+            } else {
+                return false
+            }
+        }
+        settings: settings
+        onBackRequested: {
+            mainWindow.currentPage = "main"
+        }
+    }
+
+    AboutPage {
+        id: aboutPage
+        visible: {
+            if (mainWindow.currentPage == "about") {
+                return true
+            } else {
+                return false
+            }
+        }
+        onBackRequested: {
+            mainWindow.currentPage = "main"
         }
     }
 }
