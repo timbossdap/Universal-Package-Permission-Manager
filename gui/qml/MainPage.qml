@@ -10,6 +10,8 @@ ColumnLayout {
     spacing: 8
 
     property string selectedAppId: ""
+    property string selectedSource: ""
+    property bool isSourceInstalled: true
     property alias searchText: searchBar.searchText
     property var filteredAppIds: []
     property AppSettings settings: null
@@ -33,6 +35,8 @@ ColumnLayout {
             id: appPane
             filteredAppIds: mainPage.filteredAppIds
             selectedAppId: mainPage.selectedAppId
+            selectedSource: mainPage.selectedSource
+            isSourceInstalled: mainPage.isSourceInstalled
             settings: mainPage.settings
             windowWidth: mainPage.Window.width
 
@@ -44,6 +48,8 @@ ColumnLayout {
         PermissionPanel {
             id: permPane
             selectedAppId: mainPage.selectedAppId
+            selectedSource: mainPage.selectedSource
+            isSourceInstalled: mainPage.isSourceInstalled
             settings: mainPage.settings
         }
     }

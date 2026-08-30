@@ -8,4 +8,6 @@ Settings {
     property real savedLeftBoxWidth: -1
     property bool highlightHighRisk: true
     property bool compactRows: false
+    property bool showAllTabs: false
+    property string colorScheme: "Seafoam"
 }

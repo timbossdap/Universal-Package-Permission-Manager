@@ -1,19 +1,50 @@
 use core::AppProf;
 use qmetaobject::*;
 use std::cell::RefCell;
+use std::process::Command;
 
 // which package source the gui is currently showing
-// this is the enum from lesson 4 - two variants, nothing else possible
 #[derive(Clone, Copy)]
 enum Source {
     Flatpak,
     Pacman,
+    Homebrew,
 }
 
 impl Default for Source {
     fn default() -> Self {
         Source::Flatpak
     }
+}
+
+fn is_installed(cmd: &str) -> bool {
+    Command::new("which")
+        .arg(cmd)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn detect_available_sources() -> QVariantList {
+    let mut sources: QVariantList = QVariantList::default();
+    if is_installed("flatpak") {
+        sources.push(QString::from("Flatpak").to_qvariant());
+    }
+    if is_installed("pacman") {
+        sources.push(QString::from("Pacman").to_qvariant());
+    }
+    if is_installed("brew") {
+        sources.push(QString::from("Homebrew").to_qvariant());
+    }
+    sources
+}
+
+fn all_sources() -> QVariantList {
+    let mut sources: QVariantList = QVariantList::default();
+    sources.push(QString::from("Flatpak").to_qvariant());
+    sources.push(QString::from("Pacman").to_qvariant());
+    sources.push(QString::from("Homebrew").to_qvariant());
+    sources
 }
 
 #[derive(QObject, Default)]
@@ -43,12 +74,24 @@ struct UppmBridge {
     auto_refresh_on_launch: qt_property!(bool; NOTIFY auto_refresh_on_launch_changed),
     auto_refresh_on_launch_changed: qt_signal!(),
 
-    // called from qml when the tab bar changes: 0 = flatpak, 1 = pacman
+    // list of all supported package manager sources (Flatpak, Pacman, Homebrew)
+    all_sources: qt_property!(QVariantList; NOTIFY all_sources_changed),
+    all_sources_changed: qt_signal!(),
+
+    // list of source names available on this system, e.g. ["Flatpak", "Pacman"]
+    // QML uses this to build the tab bar dynamically - only installed sources show up
+    available_sources: qt_property!(QVariantList; NOTIFY available_sources_changed),
+    available_sources_changed: qt_signal!(),
+
+    // called from qml when a tab is selected - receives the source name string
+    // (e.g. "Flatpak", "Pacman", or "Homebrew") instead of a numeric index, so the mapping
+    // stays correct regardless of which tabs are visible
     select_source: qt_method!(
-        fn select_source(&mut self, tab_index: i32) {
-            self.current_source = match tab_index {
-                0 => Source::Flatpak,
-                1 => Source::Pacman,
+        fn select_source(&mut self, source_name: String) {
+            self.current_source = match source_name.as_str() {
+                "Flatpak" => Source::Flatpak,
+                "Pacman" => Source::Pacman,
+                "Homebrew" => Source::Homebrew,
                 _ => Source::Flatpak,
             };
             self.refresh_app_ids();
@@ -101,16 +144,18 @@ struct UppmBridge {
 
     flatpak_profiles: Vec<AppProf>,
     pacman_profiles: Vec<AppProf>,
+    homebrew_profiles: Vec<AppProf>,
     current_source: Source,
 }
 
 impl UppmBridge {
     // match picks which vec to hand back based on the enum - this is the
-    // one place that knows about both sources, everything else just calls this
+    // one place that knows about all sources, everything else just calls this
     fn current_profiles(&self) -> &Vec<AppProf> {
         match self.current_source {
             Source::Flatpak => &self.flatpak_profiles,
             Source::Pacman => &self.pacman_profiles,
+            Source::Homebrew => &self.homebrew_profiles,
         }
     }
 
@@ -227,6 +272,7 @@ fn save_cache(
     path: &std::path::Path,
     flatpak: &[AppProf],
     pacman: &[AppProf],
+    homebrew: &[AppProf],
 ) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -234,27 +280,33 @@ fn save_cache(
     let mut out = String::new();
     append_profiles(&mut out, "flatpak", flatpak);
     append_profiles(&mut out, "pacman", pacman);
+    append_profiles(&mut out, "homebrew", homebrew);
     std::fs::write(path, out)
 }
 
-fn load_cache(path: &std::path::Path) -> std::io::Result<(Vec<AppProf>, Vec<AppProf>)> {
+fn load_cache(path: &std::path::Path) -> std::io::Result<(Vec<AppProf>, Vec<AppProf>, Vec<AppProf>)> {
     let text = std::fs::read_to_string(path)?;
     let mut flatpak: Vec<AppProf> = Vec::new();
     let mut pacman: Vec<AppProf> = Vec::new();
-    let mut current_is_pacman = false;
+    let mut homebrew: Vec<AppProf> = Vec::new();
+    let mut current_source = "flatpak";
 
     for line in text.lines() {
         let mut parts = line.splitn(5, '\t');
         match parts.next() {
             Some("SOURCE") => {
-                current_is_pacman = parts.next() == Some("pacman");
+                current_source = match parts.next() {
+                    Some("pacman") => "pacman",
+                    Some("homebrew") => "homebrew",
+                    _ => "flatpak",
+                };
             }
             Some("APP") => {
                 let app_id = parts.next().unwrap_or("").to_string();
-                let list = if current_is_pacman {
-                    &mut pacman
-                } else {
-                    &mut flatpak
+                let list = match current_source {
+                    "pacman" => &mut pacman,
+                    "homebrew" => &mut homebrew,
+                    _ => &mut flatpak,
                 };
                 list.push(AppProf::new(app_id));
             }
@@ -263,10 +315,10 @@ fn load_cache(path: &std::path::Path) -> std::io::Result<(Vec<AppProf>, Vec<AppP
                 let desc = parts.next().unwrap_or("").to_string();
                 let raw = parts.next().unwrap_or("").to_string();
                 let source_mech = parts.next().unwrap_or("").to_string();
-                let list = if current_is_pacman {
-                    &mut pacman
-                } else {
-                    &mut flatpak
+                let list = match current_source {
+                    "pacman" => &mut pacman,
+                    "homebrew" => &mut homebrew,
+                    _ => &mut flatpak,
                 };
                 if let Some(app) = list.last_mut() {
                     app.permissions.push(core::Perm {
@@ -281,7 +333,7 @@ fn load_cache(path: &std::path::Path) -> std::io::Result<(Vec<AppProf>, Vec<AppP
         }
     }
 
-    Ok((flatpak, pacman))
+    Ok((flatpak, pacman, homebrew))
 }
 
 fn main() {
@@ -295,12 +347,16 @@ fn main() {
     }
 
     let auto_refresh_on_launch = load_pref_auto_refresh();
+    let available_sources = detect_available_sources();
+    let all_sources = all_sources();
 
     // leaked on purpose: this bridge is meant to live for the whole program,
     // so a plain 'static reference is simpler here than fighting Rc/lifetimes
     let bridge: &'static RefCell<UppmBridge> = Box::leak(Box::new(RefCell::new(UppmBridge {
         loading: true,
         auto_refresh_on_launch,
+        available_sources,
+        all_sources,
         ..Default::default()
     })));
 
@@ -310,10 +366,11 @@ fn main() {
     // wraps a closure so it's safe to call from another thread - when called,
     // it hops back onto this (the gui) thread to actually run the closure body
     let apply_results = qmetaobject::queued_callback(
-        move |(flatpak_profiles, pacman_profiles): (Vec<AppProf>, Vec<AppProf>)| {
+        move |(flatpak_profiles, pacman_profiles, homebrew_profiles): (Vec<AppProf>, Vec<AppProf>, Vec<AppProf>)| {
             let mut b = bridge.borrow_mut();
             b.flatpak_profiles = flatpak_profiles;
             b.pacman_profiles = pacman_profiles;
+            b.homebrew_profiles = homebrew_profiles;
             b.refresh_app_ids();
             b.loading = false;
             b.loading_changed();
@@ -331,18 +388,19 @@ fn main() {
         std::thread::spawn(move || {
             let flatpak_profiles = core::collectors::flatpak::collect().unwrap_or_default();
             let pacman_profiles = core::collectors::pacman::collect().unwrap_or_default();
-            let _ = save_cache(&cache_for_thread, &flatpak_profiles, &pacman_profiles);
-            apply_results((flatpak_profiles, pacman_profiles));
+            let homebrew_profiles = core::collectors::homebrew::collect().unwrap_or_default();
+            let _ = save_cache(&cache_for_thread, &flatpak_profiles, &pacman_profiles, &homebrew_profiles);
+            apply_results((flatpak_profiles, pacman_profiles, homebrew_profiles));
         });
     } else {
         // toggle is off: try the last cached scan first instead of hitting
-        // flatpak/pacman again. falls back to a live scan (and populates the
+        // flatpak/pacman/homebrew again. falls back to a live scan (and populates the
         // cache for next time) if there's no cache yet or it's empty
         let mut used_cache = false;
-        if let Ok((flatpak_profiles, pacman_profiles)) = load_cache(&cache_file) {
-            if !flatpak_profiles.is_empty() || !pacman_profiles.is_empty() {
+        if let Ok((flatpak_profiles, pacman_profiles, homebrew_profiles)) = load_cache(&cache_file) {
+            if !flatpak_profiles.is_empty() || !pacman_profiles.is_empty() || !homebrew_profiles.is_empty() {
                 used_cache = true;
-                apply_results((flatpak_profiles, pacman_profiles));
+                apply_results((flatpak_profiles, pacman_profiles, homebrew_profiles));
             }
         }
 
@@ -351,8 +409,9 @@ fn main() {
             std::thread::spawn(move || {
                 let flatpak_profiles = core::collectors::flatpak::collect().unwrap_or_default();
                 let pacman_profiles = core::collectors::pacman::collect().unwrap_or_default();
-                let _ = save_cache(&cache_for_thread, &flatpak_profiles, &pacman_profiles);
-                apply_results((flatpak_profiles, pacman_profiles));
+                let homebrew_profiles = core::collectors::homebrew::collect().unwrap_or_default();
+                let _ = save_cache(&cache_for_thread, &flatpak_profiles, &pacman_profiles, &homebrew_profiles);
+                apply_results((flatpak_profiles, pacman_profiles, homebrew_profiles));
             });
         }
     }

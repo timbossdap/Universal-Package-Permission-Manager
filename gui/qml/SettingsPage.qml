@@ -102,7 +102,7 @@ ColumnLayout {
                     spacing: 4
                     Label { text: "Auto-refresh on launch"; font.pixelSize: 17 }
                     Label {
-                        text: "Rescan Flatpak and Pacman every time UPPM opens"
+                        text: "Rescan Flatpak, Pacman, and Homebrew every time UPPM opens"
                         color: "gray"
                         font.pixelSize: 14
                         wrapMode: Text.WordWrap
@@ -144,6 +144,86 @@ ColumnLayout {
                     onToggled: {
                         if (settingsPage.settings != null) {
                             settingsPage.settings.compactRows = checked
+                        }
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+                    Label { text: "Show all package manager tabs"; font.pixelSize: 17 }
+                    Label {
+                        text: "Display tabs for all supported package managers even if not installed"
+                        color: "gray"
+                        font.pixelSize: 14
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                }
+                Switch {
+                    checked: {
+                        if (settingsPage.settings != null) {
+                            return settingsPage.settings.showAllTabs
+                        } else {
+                            return false
+                        }
+                    }
+                    onToggled: {
+                        if (settingsPage.settings != null) {
+                            settingsPage.settings.showAllTabs = checked
+                        }
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+                    Label { text: "Color scheme"; font.pixelSize: 17 }
+                    Label {
+                        text: "Change the accent color theme of the interface"
+                        color: "gray"
+                        font.pixelSize: 14
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                }
+                OutlinedDropdown {
+                    label: "Scheme"
+                    currentValue: {
+                        if (settingsPage.settings != null && settingsPage.settings.colorScheme) {
+                            return settingsPage.settings.colorScheme
+                        } else {
+                            return "Seafoam"
+                        }
+                    }
+                    model: [
+                        "Seafoam",
+                        "Abyss",
+                        "Glacier",
+                        "Midnight",
+                        "Lavender",
+                        "Obsidian",
+                        "Mint",
+                        "Forest",
+                        "Sunrise",
+                        "Ember",
+                        "Coral",
+                        "Crimson",
+                        "Rose Quartz",
+                        "Velvet",
+                        "Silver Mist",
+                        "Gunpowder"
+                    ]
+                    notchColor: Material.background
+                    onValueSelected: function(val) {
+                        if (settingsPage.settings != null) {
+                            settingsPage.settings.colorScheme = val
                         }
                     }
                 }

@@ -7,6 +7,8 @@ Frame {
 
     property var filteredAppIds: []
     property string selectedAppId: ""
+    property string selectedSource: ""
+    property bool isSourceInstalled: true
     property AppSettings settings: null
     property real windowWidth: 800
 
@@ -105,6 +107,13 @@ Frame {
                     appPane.appSelected(id)
                 }
             }
+        }
+
+        Label {
+            anchors.centerIn: parent
+            visible: !uppm.loading && !appPane.isSourceInstalled
+            text: "manager not installed"
+            color: "gray"
         }
     }
 }

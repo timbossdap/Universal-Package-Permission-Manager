@@ -8,9 +8,12 @@ ToolBar {
     id: titleBar
 
     property int currentTabIndex: 0
+    // the list of available sources comes from the Rust bridge - only
+    // package managers that are actually installed show up as tabs
+    property var tabModel: uppm.available_sources
 
     signal openMenuRequested()
-    signal tabSelected(int index)
+    signal tabSelected(string sourceName)
 
     background: Rectangle {
         color: "#121212"
@@ -72,43 +75,39 @@ ToolBar {
                 y: tabRow.y
                 height: tabRow.height
 
-                // beginner manual position calculation with long if else
+                // manual position calculation: x position is the sum of all
+                // tab widths before the current index
                 x: {
                     var count = tabRepeater.count
                     if (count == 0) {
                         return tabRow.x
                     }
                     var idx = titleBar.currentTabIndex
-                    if (idx == 0) {
-                        return tabRow.x
-                    } else {
-                        var item0 = tabRepeater.itemAt(0)
-                        if (item0 != null) {
-                            var w = item0.width
-                            var sp = tabRow.spacing
-                            var totalX = tabRow.x + w + sp
-                            return totalX
-                        } else {
-                            return tabRow.x
+                    var totalX = tabRow.x
+                    var i = 0
+                    while (i < idx && i < count) {
+                        var item = tabRepeater.itemAt(i)
+                        if (item != null) {
+                            totalX += item.width + tabRow.spacing
                         }
+                        i = i + 1
                     }
+                    return totalX
                 }
 
-                // beginner manual width calculation
+                // width of the currently selected tab
                 width: {
                     var count = tabRepeater.count
                     if (count > 0) {
                         var idx = titleBar.currentTabIndex
-                        var currentItem = tabRepeater.itemAt(idx)
-                        if (currentItem != null) {
-                            var w = currentItem.width
-                            return w
-                        } else {
-                            return 0
+                        if (idx >= 0 && idx < count) {
+                            var currentItem = tabRepeater.itemAt(idx)
+                            if (currentItem != null) {
+                                return currentItem.width
+                            }
                         }
-                    } else {
-                        return 0
                     }
+                    return 0
                 }
 
                 Behavior on x { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
@@ -124,7 +123,7 @@ ToolBar {
 
                 Repeater {
                     id: tabRepeater
-                    model: ["Flatpak", "Pacman"]
+                    model: tabModel
 
                     delegate: Item {
                         id: tabItem
@@ -157,7 +156,8 @@ ToolBar {
                                 if (cur == index) {
                                     return
                                 } else {
-                                    titleBar.tabSelected(index)
+                                    titleBar.currentTabIndex = index
+                                    titleBar.tabSelected(modelData)
                                 }
                             }
                         }

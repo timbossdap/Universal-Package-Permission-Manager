@@ -86,7 +86,7 @@ ColumnLayout {
             }
 
             Label {
-                text: "An all-in-one solution to view and manage your permissions from different package managers such as Flatpak and Pacman, through a modern minimalist GUI built with Rust and QML, with the beautiful Material themeing."
+                text: "An all-in-one solution to view and manage your permissions from different package managers such as Flatpak, Pacman, and Homebrew, through a modern minimalist GUI built with Rust and QML, with the beautiful Material themeing."
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
                 font.pixelSize: 15

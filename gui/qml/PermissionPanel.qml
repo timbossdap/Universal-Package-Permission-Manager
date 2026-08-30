@@ -6,6 +6,8 @@ Frame {
     id: permPane
 
     property string selectedAppId: ""
+    property string selectedSource: ""
+    property bool isSourceInstalled: true
     property AppSettings settings: null
 
     SplitView.fillWidth: true
@@ -96,6 +98,9 @@ Frame {
                 }
             }
             text: {
+                if (permPane.isSourceInstalled === false) {
+                    return "manager not installed"
+                }
                 var app = permPane.selectedAppId
                 if (app == "") {
                     return "select an app on the left to see its permissions"
