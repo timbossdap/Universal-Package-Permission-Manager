@@ -1,5 +1,5 @@
 use core::AppProf;
-use qmetaobject::qtcore::QCoreApplication;
+use qmetaobject::qtcore::core_application::QCoreApplication;
 use qmetaobject::*;
 use std::cell::RefCell;
 use std::process::Command;
