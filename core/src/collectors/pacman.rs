@@ -25,7 +25,18 @@ fn list_app_ids() -> Result<Vec<String>, CollectorError> {
 
 fn describe_path(path: &str) -> Option<(PermCat, String)> {
     let p = path;
-    if p.starts_with("/usr/lib/systemd/system/") || p.starts_with("/etc/systemd/system/") {
+    // .socket units specifically mean "opens a listening socket" - check
+    // this before the generic systemd-directory branch below, since it's
+    // a more specific (and more Network-flavored) claim than a plain service
+    if p.ends_with(".socket")
+        && (p.starts_with("/usr/lib/systemd/system/") || p.starts_with("/etc/systemd/system/"))
+    {
+        Some((
+            PermCat::Network,
+            "Installs a systemd socket unit (opens a listening socket for network/IPC activation)"
+                .to_string(),
+        ))
+    } else if p.starts_with("/usr/lib/systemd/system/") || p.starts_with("/etc/systemd/system/") {
         Some((
             PermCat::System,
             "Installs a systemd service (can run privileged/background processes)".to_string(),
@@ -75,6 +86,33 @@ fn describe_path(path: &str) -> Option<(PermCat, String)> {
         Some((
             PermCat::System,
             "Installs a cron job (scheduled execution)".to_string(),
+        ))
+    } else if p.starts_with("/etc/apparmor.d/") {
+        Some((PermCat::System, "Installs an AppArmor profile".to_string()))
+    } else if p.starts_with("/usr/share/selinux/") {
+        Some((
+            PermCat::System,
+            "Installs an SELinux policy module".to_string(),
+        ))
+    } else if p.starts_with("/etc/profile.d/") {
+        Some((
+            PermCat::System,
+            "Modifies the shell environment for all users at login".to_string(),
+        ))
+    } else if p.starts_with("/etc/xdg/autostart/") {
+        Some((
+            PermCat::Desktop,
+            "Registers an autostart entry (runs automatically at login)".to_string(),
+        ))
+    } else if p.starts_with("/usr/share/dbus-1/services/") {
+        Some((
+            PermCat::Desktop,
+            "Installs a D-Bus session service".to_string(),
+        ))
+    } else if p.starts_with("/usr/lib/tmpfiles.d/") || p.starts_with("/etc/tmpfiles.d/") {
+        Some((
+            PermCat::System,
+            "Creates/modifies files or directories at boot (tmpfiles.d)".to_string(),
         ))
     } else {
         None
@@ -209,16 +247,36 @@ const PRIVILEGED_DEPS: &[(&str, &str)] = &[
     ),
     ("dbus", "Depends on dbus (privileged IPC access)"),
     ("pam", "Depends on PAM (can affect authentication)"),
+    (
+        "firewalld",
+        "Depends on firewalld (can alter firewall rules)",
+    ),
+    ("bluez", "Depends on bluez (Bluetooth stack access)"),
+    ("avahi", "Depends on avahi (network service discovery)"),
+    ("cups", "Depends on CUPS (printing system access)"),
+    (
+        "docker",
+        "Depends on docker (container runtime - effectively root-equivalent access)",
+    ),
 ];
 
-fn get_all_depends() -> HashMap<String, Vec<String>> {
+// per-package info pulled from a single `pacman -Qi` pass - depends and
+// install-script are both fields on the same block per package, so it's
+// free to grab both here instead of running pacman -Qi twice
+struct PkgInfo {
+    depends: Vec<String>,
+    has_install_script: bool,
+}
+
+fn get_all_pkg_info() -> HashMap<String, PkgInfo> {
     let output = match Command::new("pacman").arg("-Qi").output() {
         Ok(o) if o.status.success() => o,
         _ => return HashMap::new(),
     };
     let text = String::from_utf8_lossy(&output.stdout).to_string();
-    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    let mut map: HashMap<String, PkgInfo> = HashMap::new();
     let mut current_name: Option<String> = None;
+
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("Name") {
             let rest = rest
@@ -226,6 +284,10 @@ fn get_all_depends() -> HashMap<String, Vec<String>> {
                 .trim();
             if !rest.is_empty() {
                 current_name = Some(rest.to_string());
+                map.entry(rest.to_string()).or_insert(PkgInfo {
+                    depends: Vec::new(),
+                    has_install_script: false,
+                });
             }
         } else if let Some(rest) = line.strip_prefix("Depends On") {
             let rest = rest
@@ -241,15 +303,27 @@ fn get_all_depends() -> HashMap<String, Vec<String>> {
                     .map(|d| d.split(['>', '<', '=']).next().unwrap_or(d).to_string())
                     .collect()
             };
-            map.insert(name, deps);
+            if let Some(entry) = map.get_mut(&name) {
+                entry.depends = deps;
+            }
+        } else if let Some(rest) = line.strip_prefix("Install Script") {
+            let rest = rest
+                .trim_start_matches(|c: char| c == ' ' || c == ':')
+                .trim();
+            let Some(name) = current_name.clone() else {
+                continue;
+            };
+            if let Some(entry) = map.get_mut(&name) {
+                entry.has_install_script = rest.eq_ignore_ascii_case("Yes");
+            }
         }
     }
     map
 }
 
-fn check_dependencies(app_id: &str, depends_map: &HashMap<String, Vec<String>>) -> Vec<Perm> {
+fn check_dependencies(app_id: &str, pkg_info: &HashMap<String, PkgInfo>) -> Vec<Perm> {
     let empty: Vec<String> = Vec::new();
-    let deps = depends_map.get(app_id).unwrap_or(&empty);
+    let deps = pkg_info.get(app_id).map(|info| &info.depends).unwrap_or(&empty);
     let mut results = Vec::new();
     for (needle, desc) in PRIVILEGED_DEPS {
         if deps.iter().any(|d| d == needle) {
@@ -264,17 +338,89 @@ fn check_dependencies(app_id: &str, depends_map: &HashMap<String, Vec<String>>) 
     results
 }
 
+// install scriptlets (.install) run arbitrary code as root during
+// install/upgrade/remove - this is pacman's rough equivalent of a Flatpak
+// permission, and the single biggest trust decision a package makes, so
+// it's worth surfacing even without inspecting what the script actually does
+fn check_install_script(app_id: &str, pkg_info: &HashMap<String, PkgInfo>) -> Option<Perm> {
+    let info = pkg_info.get(app_id)?;
+    if !info.has_install_script {
+        return None;
+    }
+    Some(Perm {
+        cat: PermCat::System,
+        desc: "Runs a pacman install script (arbitrary code as root during install/upgrade/remove)"
+            .to_string(),
+        source_mech: "pacman-install-script".to_string(),
+        raw: format!("{app_id}.install"),
+    })
+}
+
+// maps package name -> its local metadata dir under /var/lib/pacman/local,
+// so check_group_hints can find each package's .install script by name
+fn build_local_dir_map() -> HashMap<String, std::path::PathBuf> {
+    let mut map = HashMap::new();
+    let Ok(entries) = std::fs::read_dir("/var/lib/pacman/local") else {
+        return map;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // dir names are "pkgname-pkgver-pkgrel" - split from the right so
+        // pkgnames that themselves contain hyphens still work
+        let parts: Vec<&str> = name.rsplitn(3, '-').collect();
+        if parts.len() == 3 {
+            map.insert(parts[2].to_string(), path);
+        }
+    }
+    map
+}
+
+// hardware access on Arch is usually gated by unix group membership
+// (video, dialout, etc.) rather than a sandbox permission, and install
+// scripts often tell the user to `usermod -aG <group> $USER` in their
+// post-install message. this is a heuristic (greps the script text) not
+// ground truth - it's possible for a script to mention a group name
+// without actually adding the user to it, so treat this as a hint
+const HARDWARE_GROUPS: &[&str] = &[
+    "video", "audio", "dialout", "wireshark", "docker", "scanner", "lp", "kvm", "render",
+];
+
+fn check_group_hints(pkg: &str, local_dirs: &HashMap<String, std::path::PathBuf>) -> Option<Perm> {
+    let dir = local_dirs.get(pkg)?;
+    let content = std::fs::read_to_string(dir.join("install")).ok()?;
+    let group = HARDWARE_GROUPS
+        .iter()
+        .find(|g| content.contains("usermod") && content.contains(*g))?;
+    Some(Perm {
+        cat: PermCat::Hardware,
+        desc: format!(
+            "Install script suggests adding your user to the '{group}' group (grants hardware access outside pacman's own permission model)"
+        ),
+        source_mech: "pacman-install-script".to_string(),
+        raw: dir.join("install").display().to_string(),
+    })
+}
+
 pub fn collect() -> Result<Vec<AppProf>, String> {
     let app_ids = list_app_ids().map_err(|e| e.to_string())?;
     let owned_files = list_all_owned_files().map_err(|e| e.to_string())?;
-    let depends_map = get_all_depends();
+    let pkg_info = get_all_pkg_info();
+    let local_dirs = build_local_dir_map();
 
     let mut profiles = Vec::new();
     for id in app_ids {
         match owned_files.get(&id) {
             Some(files) => {
                 let mut permissions = parse_permissions(files);
-                permissions.extend(check_dependencies(&id, &depends_map));
+                permissions.extend(check_dependencies(&id, &pkg_info));
+                permissions.extend(check_install_script(&id, &pkg_info));
+                permissions.extend(check_group_hints(&id, &local_dirs));
                 let mut profile = AppProf::new(id);
                 profile.permissions = permissions;
                 profiles.push(profile);

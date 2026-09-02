@@ -13,7 +13,7 @@ Item {
 
     FontLoader {
         id: materialFont
-        source: "MaterialIcons-Regular.ttf"
+        source: "./MaterialIcons-Regular.ttf"
     }
 
     Text {

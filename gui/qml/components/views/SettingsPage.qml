@@ -2,6 +2,9 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Controls.Material 2.15
 import QtQuick.Layouts 1.15
+import ".."
+import "../controls"
+import "../.."
 
 // settings page
 ColumnLayout {
@@ -115,6 +118,32 @@ ColumnLayout {
                     onToggled: {
                         var val = checked
                         uppm.set_auto_refresh_on_launch(val)
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+                    Label { text: "Load tabs on demand"; font.pixelSize: 17 }
+                    Label {
+                        text: "Flatpak loads right away - Pacman and Homebrew wait until you open their tab"
+                        color: "gray"
+                        font.pixelSize: 14
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                }
+                // lives on the rust side (not AppSettings) since main.rs needs
+                // to know this before qml even loads, to decide whether to
+                // kick off the eager pacman/homebrew scans at startup
+                Switch {
+                    checked: uppm.lazy_load_tabs
+                    onToggled: {
+                        var val = checked
+                        uppm.set_lazy_load_tabs(val)
                     }
                 }
             }

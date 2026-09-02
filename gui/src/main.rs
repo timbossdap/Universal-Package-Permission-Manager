@@ -1,10 +1,11 @@
 use core::AppProf;
+use qmetaobject::qtcore::QCoreApplication;
 use qmetaobject::*;
 use std::cell::RefCell;
 use std::process::Command;
 
 // which package source the gui is currently showing
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Source {
     Flatpak,
     Pacman,
@@ -14,6 +15,14 @@ enum Source {
 impl Default for Source {
     fn default() -> Self {
         Source::Flatpak
+    }
+}
+
+fn source_label(src: Source) -> &'static str {
+    match src {
+        Source::Flatpak => "flatpak",
+        Source::Pacman => "pacman",
+        Source::Homebrew => "homebrew",
     }
 }
 
@@ -62,17 +71,27 @@ struct UppmBridge {
     permissions_hi_risk: qt_property!(QVariantList; NOTIFY permissions_hi_risk_changed),
     permissions_hi_risk_changed: qt_signal!(),
 
-    // true while the collectors are still running in the background
+    // true while the *currently selected* source is still being collected.
+    // this used to only ever be true once at startup - now that sources can
+    // be (re)loaded lazily, it flips back to true whenever the user selects
+    // a tab whose data hasn't been fetched yet
     loading: qt_property!(bool; NOTIFY loading_changed),
     loading_changed: qt_signal!(),
 
-    // mirrors the persisted preference (see load_pref_auto_refresh/
-    // save_pref_auto_refresh below) - read once at startup to decide
-    // whether main() does a live scan or loads the cache, then kept here
-    // just so the settings page has something to bind its Switch to and
-    // reflect back what's actually in effect for *this* run
+    // mirrors the persisted preference (see load_prefs/save_prefs below) -
+    // read once at startup to decide whether main() does a live scan or
+    // loads the cache, then kept here just so the settings page has
+    // something to bind its Switch to and reflect back what's actually in
+    // effect for *this* run
     auto_refresh_on_launch: qt_property!(bool; NOTIFY auto_refresh_on_launch_changed),
     auto_refresh_on_launch_changed: qt_signal!(),
+
+    // when true, only Flatpak is scanned automatically at launch - Pacman
+    // and Homebrew are deferred until the user actually clicks their tab.
+    // Flatpak is exempt on purpose: it's always eager, so there's
+    // something on screen the moment the window appears
+    lazy_load_tabs: qt_property!(bool; NOTIFY lazy_load_tabs_changed),
+    lazy_load_tabs_changed: qt_signal!(),
 
     // list of all supported package manager sources (Flatpak, Pacman, Homebrew)
     all_sources: qt_property!(QVariantList; NOTIFY all_sources_changed),
@@ -94,11 +113,84 @@ struct UppmBridge {
                 "Homebrew" => Source::Homebrew,
                 _ => Source::Flatpak,
             };
+
+            let already_loaded = self.is_current_source_loaded();
+            self.loading = !already_loaded;
+            self.loading_changed();
+
             self.refresh_app_ids();
             self.permissions = QVariantList::default();
             self.permissions_changed();
             self.permissions_hi_risk = QVariantList::default();
             self.permissions_hi_risk_changed();
+
+            if self.lazy_load_tabs && !already_loaded {
+                self.ensure_source_loading();
+            }
+        }
+    ),
+
+    // kicks off a background scan for whichever source is currently
+    // selected, if (and only if) it isn't already loaded or already in
+    // flight. only meaningful for Pacman/Homebrew - Flatpak is always
+    // started eagerly in main() so there's nothing for this to do there
+    ensure_source_loading: qt_method!(
+        fn ensure_source_loading(&mut self) {
+            let src = self.current_source;
+
+            if src == Source::Flatpak {
+                return;
+            }
+
+            let already_running = match src {
+                Source::Pacman => self.pacman_loading_flag,
+                Source::Homebrew => self.homebrew_loading_flag,
+                Source::Flatpak => true,
+            };
+            if already_running {
+                return;
+            }
+
+            match src {
+                Source::Pacman => self.pacman_loading_flag = true,
+                Source::Homebrew => self.homebrew_loading_flag = true,
+                Source::Flatpak => {}
+            }
+
+            let handle = match self.self_handle {
+                Some(h) => h,
+                None => return,
+            };
+            let auto_refresh = self.auto_refresh_on_launch;
+
+            // built here, on the gui thread, then handed off to the worker
+            // thread below - same pattern main() uses for the eager scans
+            let apply = qmetaobject::queued_callback(move |profiles: Vec<AppProf>| {
+                let mut b = handle.borrow_mut();
+                match src {
+                    Source::Pacman => {
+                        b.pacman_profiles = profiles;
+                        b.pacman_loaded = true;
+                        b.pacman_loading_flag = false;
+                    }
+                    Source::Homebrew => {
+                        b.homebrew_profiles = profiles;
+                        b.homebrew_loaded = true;
+                        b.homebrew_loading_flag = false;
+                    }
+                    Source::Flatpak => {}
+                }
+                if b.current_source == src {
+                    b.refresh_app_ids();
+                    b.loading = false;
+                    b.loading_changed();
+                }
+            });
+
+            std::thread::spawn(move || {
+                let profiles = collect_and_cache(src, auto_refresh);
+                apply(profiles);
+            });
         }
     ),
 
@@ -138,7 +230,24 @@ struct UppmBridge {
         fn set_auto_refresh_on_launch(&mut self, val: bool) {
             self.auto_refresh_on_launch = val;
             self.auto_refresh_on_launch_changed();
-            save_pref_auto_refresh(val);
+            save_prefs(&Prefs {
+                auto_refresh_on_launch: val,
+                lazy_load_tabs: self.lazy_load_tabs,
+            });
+        }
+    ),
+
+    // called from the settings page when "Load tabs on demand" is
+    // toggled. like auto-refresh, this only affects *future* launches -
+    // it doesn't retroactively cancel or start scans for the current run
+    set_lazy_load_tabs: qt_method!(
+        fn set_lazy_load_tabs(&mut self, val: bool) {
+            self.lazy_load_tabs = val;
+            self.lazy_load_tabs_changed();
+            save_prefs(&Prefs {
+                auto_refresh_on_launch: self.auto_refresh_on_launch,
+                lazy_load_tabs: val,
+            });
         }
     ),
 
@@ -146,6 +255,23 @@ struct UppmBridge {
     pacman_profiles: Vec<AppProf>,
     homebrew_profiles: Vec<AppProf>,
     current_source: Source,
+
+    // per-source "has this ever finished a scan this run" flags
+    flatpak_loaded: bool,
+    pacman_loaded: bool,
+    homebrew_loaded: bool,
+
+    // per-source "is a background scan currently in flight" flags - guards
+    // against double-spawning a scan if the user bounces between tabs
+    // while one is still loading. flatpak has no such flag since it's
+    // never triggered lazily
+    pacman_loading_flag: bool,
+    homebrew_loading_flag: bool,
+
+    // set once, right after the bridge is created in main(), so methods
+    // triggered from qml (like ensure_source_loading) can spawn a worker
+    // thread and hand it a way to write back into this same bridge later
+    self_handle: Option<&'static RefCell<UppmBridge>>,
 }
 
 impl UppmBridge {
@@ -156,6 +282,14 @@ impl UppmBridge {
             Source::Flatpak => &self.flatpak_profiles,
             Source::Pacman => &self.pacman_profiles,
             Source::Homebrew => &self.homebrew_profiles,
+        }
+    }
+
+    fn is_current_source_loaded(&self) -> bool {
+        match self.current_source {
+            Source::Flatpak => self.flatpak_loaded,
+            Source::Pacman => self.pacman_loaded,
+            Source::Homebrew => self.homebrew_loaded,
         }
     }
 
@@ -170,10 +304,16 @@ impl UppmBridge {
     }
 }
 
-// --- persisted preference: "auto-refresh on launch" ---------------------
+// --- persisted preferences: "auto-refresh on launch" + "load tabs on
+// demand" ---------------------------------------------------------------
 //
 // deliberately a flat "key=value" text file rather than pulling in a
-// config-file crate for one boolean - std::fs is all this needs.
+// config-file crate for two booleans - std::fs is all this needs.
+
+struct Prefs {
+    auto_refresh_on_launch: bool,
+    lazy_load_tabs: bool,
+}
 
 fn prefs_path() -> std::path::PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")
@@ -185,30 +325,51 @@ fn prefs_path() -> std::path::PathBuf {
     base.join("uppm").join("prefs.txt")
 }
 
-// defaults to true (matches the scan-every-launch behaviour the app has
-// always had) whenever the prefs file is missing, unreadable, or doesn't
+// defaults match the app's original behaviour (auto-refresh on, lazy
+// loading off) whenever the prefs file is missing, unreadable, or doesn't
 // explicitly say otherwise
-fn load_pref_auto_refresh() -> bool {
-    match std::fs::read_to_string(prefs_path()) {
-        Ok(text) => text.trim() != "auto_refresh=false",
-        Err(_) => true,
+fn load_prefs() -> Prefs {
+    let mut prefs = Prefs {
+        auto_refresh_on_launch: true,
+        lazy_load_tabs: false,
+    };
+
+    if let Ok(text) = std::fs::read_to_string(prefs_path()) {
+        for line in text.lines() {
+            match line.trim() {
+                "auto_refresh=false" => prefs.auto_refresh_on_launch = false,
+                "auto_refresh=true" => prefs.auto_refresh_on_launch = true,
+                "lazy_load_tabs=true" => prefs.lazy_load_tabs = true,
+                "lazy_load_tabs=false" => prefs.lazy_load_tabs = false,
+                _ => {}
+            }
+        }
     }
+
+    prefs
 }
 
-fn save_pref_auto_refresh(val: bool) {
+fn save_prefs(prefs: &Prefs) {
     let path = prefs_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(path, format!("auto_refresh={}", val));
+    let text = format!(
+        "auto_refresh={}\nlazy_load_tabs={}\n",
+        prefs.auto_refresh_on_launch, prefs.lazy_load_tabs
+    );
+    let _ = std::fs::write(path, text);
 }
 
 // --- scan cache -----------------------------------------------------------
 //
-// plain tab-separated text, one "SOURCE" line per package source followed
-// by its "APP"/"PERM" lines - no serde dependency needed for three simple
-// record kinds. tabs/newlines inside any field get flattened to spaces on
-// the way out so the line format can't be broken by unusual package
+// plain tab-separated text, one file per source ("scan_cache_flatpak.txt",
+// "scan_cache_pacman.txt", "scan_cache_homebrew.txt"), each holding
+// "APP"/"PERM" lines - no serde dependency needed for two simple record
+// kinds. splitting the cache per source (rather than one combined file)
+// is what lets each source be scanned and cached completely independently
+// of the others. tabs/newlines inside any field get flattened to spaces
+// on the way out so the line format can't be broken by unusual package
 // metadata; the very rare loss of an embedded tab character in, say, a raw
 // permission string is an acceptable trade-off for a cache file.
 
@@ -236,20 +397,25 @@ fn sanitize_field(s: &str) -> String {
     s.replace('\t', " ").replace('\n', " ")
 }
 
-fn cache_path() -> std::path::PathBuf {
+fn cache_dir() -> std::path::PathBuf {
     let base = std::env::var("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
             std::path::PathBuf::from(home).join(".cache")
         });
-    base.join("uppm").join("scan_cache.txt")
+    base.join("uppm")
 }
 
-fn append_profiles(out: &mut String, source_label: &str, profiles: &[AppProf]) {
-    out.push_str("SOURCE\t");
-    out.push_str(source_label);
-    out.push('\n');
+fn cache_path(src: Source) -> std::path::PathBuf {
+    cache_dir().join(format!("scan_cache_{}.txt", source_label(src)))
+}
+
+fn save_cache(path: &std::path::Path, profiles: &[AppProf]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut out = String::new();
     for app in profiles {
         out.push_str("APP\t");
         out.push_str(&sanitize_field(&app.app_id));
@@ -266,61 +432,26 @@ fn append_profiles(out: &mut String, source_label: &str, profiles: &[AppProf]) {
             out.push('\n');
         }
     }
-}
-
-fn save_cache(
-    path: &std::path::Path,
-    flatpak: &[AppProf],
-    pacman: &[AppProf],
-    homebrew: &[AppProf],
-) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut out = String::new();
-    append_profiles(&mut out, "flatpak", flatpak);
-    append_profiles(&mut out, "pacman", pacman);
-    append_profiles(&mut out, "homebrew", homebrew);
     std::fs::write(path, out)
 }
 
-fn load_cache(path: &std::path::Path) -> std::io::Result<(Vec<AppProf>, Vec<AppProf>, Vec<AppProf>)> {
+fn load_cache(path: &std::path::Path) -> std::io::Result<Vec<AppProf>> {
     let text = std::fs::read_to_string(path)?;
-    let mut flatpak: Vec<AppProf> = Vec::new();
-    let mut pacman: Vec<AppProf> = Vec::new();
-    let mut homebrew: Vec<AppProf> = Vec::new();
-    let mut current_source = "flatpak";
+    let mut profiles: Vec<AppProf> = Vec::new();
 
     for line in text.lines() {
         let mut parts = line.splitn(5, '\t');
         match parts.next() {
-            Some("SOURCE") => {
-                current_source = match parts.next() {
-                    Some("pacman") => "pacman",
-                    Some("homebrew") => "homebrew",
-                    _ => "flatpak",
-                };
-            }
             Some("APP") => {
                 let app_id = parts.next().unwrap_or("").to_string();
-                let list = match current_source {
-                    "pacman" => &mut pacman,
-                    "homebrew" => &mut homebrew,
-                    _ => &mut flatpak,
-                };
-                list.push(AppProf::new(app_id));
+                profiles.push(AppProf::new(app_id));
             }
             Some("PERM") => {
                 let cat = perm_cat_from_str(parts.next().unwrap_or(""));
                 let desc = parts.next().unwrap_or("").to_string();
                 let raw = parts.next().unwrap_or("").to_string();
                 let source_mech = parts.next().unwrap_or("").to_string();
-                let list = match current_source {
-                    "pacman" => &mut pacman,
-                    "homebrew" => &mut homebrew,
-                    _ => &mut flatpak,
-                };
-                if let Some(app) = list.last_mut() {
+                if let Some(app) = profiles.last_mut() {
                     app.permissions.push(core::Perm {
                         cat,
                         desc,
@@ -333,7 +464,35 @@ fn load_cache(path: &std::path::Path) -> std::io::Result<(Vec<AppProf>, Vec<AppP
         }
     }
 
-    Ok((flatpak, pacman, homebrew))
+    Ok(profiles)
+}
+
+fn collect_live(src: Source) -> Vec<AppProf> {
+    match src {
+        Source::Flatpak => core::collectors::flatpak::collect().unwrap_or_default(),
+        Source::Pacman => core::collectors::pacman::collect().unwrap_or_default(),
+        Source::Homebrew => core::collectors::homebrew::collect().unwrap_or_default(),
+    }
+}
+
+// scans a single source live, or falls back to its own cache file when
+// "auto-refresh on launch" is off. this is the one function both the
+// eager startup scans (in main()) and the on-demand lazy scans
+// (ensure_source_loading) call, so both paths behave identically
+fn collect_and_cache(src: Source, auto_refresh: bool) -> Vec<AppProf> {
+    let path = cache_path(src);
+
+    if !auto_refresh {
+        if let Ok(profiles) = load_cache(&path) {
+            if !profiles.is_empty() {
+                return profiles;
+            }
+        }
+    }
+
+    let profiles = collect_live(src);
+    let _ = save_cache(&path, &profiles);
+    profiles
 }
 
 fn main() {
@@ -346,7 +505,17 @@ fn main() {
         std::env::set_var("QT_QUICK_CONTROLS_STYLE", "Material");
     }
 
-    let auto_refresh_on_launch = load_pref_auto_refresh();
+    // Qt.labs.settings' Settings type (used by AppSettings.qml) refuses to
+    // read/write anything and logs "Failed to initialize QSettings instance"
+    // until an organization + application name are set on QCoreApplication -
+    // this has to happen before QmlEngine::new() spins up the app, same as
+    // the style var above
+    QCoreApplication::set_organization_name("uppm".into());
+    QCoreApplication::set_application_name("UPPM".into());
+
+    let prefs = load_prefs();
+    let auto_refresh_on_launch = prefs.auto_refresh_on_launch;
+    let lazy_load_tabs = prefs.lazy_load_tabs;
     let available_sources = detect_available_sources();
     let all_sources = all_sources();
 
@@ -355,63 +524,72 @@ fn main() {
     let bridge: &'static RefCell<UppmBridge> = Box::leak(Box::new(RefCell::new(UppmBridge {
         loading: true,
         auto_refresh_on_launch,
+        lazy_load_tabs,
         available_sources,
         all_sources,
         ..Default::default()
     })));
 
+    // give the bridge a way to reach itself later, so methods invoked from
+    // qml (ensure_source_loading) can spawn worker threads that write back
+    // into it once a lazily-triggered scan finishes
+    bridge.borrow_mut().self_handle = Some(bridge);
+
     let mut engine = QmlEngine::new();
     engine.set_object_property("uppm".into(), unsafe { QObjectPinned::new(bridge) });
 
-    // wraps a closure so it's safe to call from another thread - when called,
-    // it hops back onto this (the gui) thread to actually run the closure body
-    let apply_results = qmetaobject::queued_callback(
-        move |(flatpak_profiles, pacman_profiles, homebrew_profiles): (Vec<AppProf>, Vec<AppProf>, Vec<AppProf>)| {
+    // Flatpak always scans immediately on launch, regardless of the
+    // "load tabs on demand" setting, so there's something on screen the
+    // moment the window appears.
+    {
+        let apply = qmetaobject::queued_callback(move |profiles: Vec<AppProf>| {
             let mut b = bridge.borrow_mut();
-            b.flatpak_profiles = flatpak_profiles;
-            b.pacman_profiles = pacman_profiles;
-            b.homebrew_profiles = homebrew_profiles;
-            b.refresh_app_ids();
-            b.loading = false;
-            b.loading_changed();
-        },
-    );
-
-    let cache_file = cache_path();
-
-    if auto_refresh_on_launch {
-        // unchanged from before: always scan live off the gui thread so the
-        // window shows up instantly. also opportunistically writes the
-        // results to the cache file so a future launch with the toggle off
-        // has something to fall back on
-        let cache_for_thread = cache_file.clone();
-        std::thread::spawn(move || {
-            let flatpak_profiles = core::collectors::flatpak::collect().unwrap_or_default();
-            let pacman_profiles = core::collectors::pacman::collect().unwrap_or_default();
-            let homebrew_profiles = core::collectors::homebrew::collect().unwrap_or_default();
-            let _ = save_cache(&cache_for_thread, &flatpak_profiles, &pacman_profiles, &homebrew_profiles);
-            apply_results((flatpak_profiles, pacman_profiles, homebrew_profiles));
-        });
-    } else {
-        // toggle is off: try the last cached scan first instead of hitting
-        // flatpak/pacman/homebrew again. falls back to a live scan (and populates the
-        // cache for next time) if there's no cache yet or it's empty
-        let mut used_cache = false;
-        if let Ok((flatpak_profiles, pacman_profiles, homebrew_profiles)) = load_cache(&cache_file) {
-            if !flatpak_profiles.is_empty() || !pacman_profiles.is_empty() || !homebrew_profiles.is_empty() {
-                used_cache = true;
-                apply_results((flatpak_profiles, pacman_profiles, homebrew_profiles));
+            b.flatpak_profiles = profiles;
+            b.flatpak_loaded = true;
+            if b.current_source == Source::Flatpak {
+                b.refresh_app_ids();
+                b.loading = false;
+                b.loading_changed();
             }
-        }
+        });
+        std::thread::spawn(move || {
+            let profiles = collect_and_cache(Source::Flatpak, auto_refresh_on_launch);
+            apply(profiles);
+        });
+    }
 
-        if !used_cache {
-            let cache_for_thread = cache_file.clone();
+    // Pacman and Homebrew: scanned eagerly too unless "load tabs on
+    // demand" is turned on, in which case select_source()/
+    // ensure_source_loading() kick each of them off the first time their
+    // tab is actually opened. each source gets its own thread + callback
+    // so one slow collector can never block another source's list (or
+    // Flatpak's) from showing up - they were previously bundled into a
+    // single thread/callback, which meant Flatpak's list couldn't appear
+    // until Pacman and Homebrew were both done too.
+    if !lazy_load_tabs {
+        for src in [Source::Pacman, Source::Homebrew] {
+            let apply = qmetaobject::queued_callback(move |profiles: Vec<AppProf>| {
+                let mut b = bridge.borrow_mut();
+                match src {
+                    Source::Pacman => {
+                        b.pacman_profiles = profiles;
+                        b.pacman_loaded = true;
+                    }
+                    Source::Homebrew => {
+                        b.homebrew_profiles = profiles;
+                        b.homebrew_loaded = true;
+                    }
+                    Source::Flatpak => {}
+                }
+                if b.current_source == src {
+                    b.refresh_app_ids();
+                    b.loading = false;
+                    b.loading_changed();
+                }
+            });
             std::thread::spawn(move || {
-                let flatpak_profiles = core::collectors::flatpak::collect().unwrap_or_default();
-                let pacman_profiles = core::collectors::pacman::collect().unwrap_or_default();
-                let homebrew_profiles = core::collectors::homebrew::collect().unwrap_or_default();
-                let _ = save_cache(&cache_for_thread, &flatpak_profiles, &pacman_profiles, &homebrew_profiles);
-                apply_results((flatpak_profiles, pacman_profiles, homebrew_profiles));
+                let profiles = collect_and_cache(src, auto_refresh_on_launch);
+                apply(profiles);
             });
         }
     }
